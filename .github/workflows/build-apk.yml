@@ -1,0 +1,94 @@
+name: Build Baatly APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "*.zip"
+      - ".github/workflows/build-apk.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Find Baatly ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=$(find . -maxdepth 1 -type f -name "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: Baatly ZIP file not found."
+            exit 1
+          fi
+
+          echo "ZIP found: $ZIP_FILE"
+
+          rm -rf _baatly_project
+          mkdir -p _baatly_project
+
+          unzip -q "$ZIP_FILE" -d _baatly_project
+
+          if [ -f "_baatly_project/gradlew" ]; then
+            PROJECT_DIR="_baatly_project"
+          else
+            PROJECT_DIR=$(dirname "$(find _baatly_project -type f -name gradlew | head -n 1)")
+          fi
+
+          if [ -z "$PROJECT_DIR" ] || [ ! -f "$PROJECT_DIR/gradlew" ]; then
+            echo "ERROR: gradlew not found inside ZIP."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Create .env from GitHub Secrets
+        shell: bash
+        run: |
+          set -e
+
+          cat > "$PROJECT_DIR/.env" <<EOF
+          SUPABASE_URL=${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY=${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          AGORA_APP_ID=${{ secrets.AGORA_APP_ID }}
+          EOF
+
+          chmod 600 "$PROJECT_DIR/.env"
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          chmod +x gradlew
+
+          ./gradlew --no-daemon clean :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: baatly-debug-apk
+          path: "${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk"
+          if-no-files-found: error
+          retention-days: 7
