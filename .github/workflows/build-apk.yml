@@ -1,4 +1,4 @@
-name: Build Baatly APK
+ name: Build Baatly APK
 
 on:
   workflow_dispatch:
@@ -74,7 +74,25 @@ jobs:
 
           chmod 600 "$PROJECT_DIR/.env"
 
-      - name: Build Debug APK
+      - name: Prepare release keystore
+        shell: bash
+        run: |
+          set -e
+
+          KEYSTORE_FILE="$RUNNER_TEMP/baatly-upload.jks"
+
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$KEYSTORE_FILE"
+
+          if [ ! -s "$KEYSTORE_FILE" ]; then
+            echo "ERROR: Keystore could not be created."
+            exit 1
+          fi
+
+          echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+          echo "STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
+
+      - name: Build Signed Release APK
         shell: bash
         run: |
           set -e
@@ -83,12 +101,33 @@ jobs:
 
           chmod +x gradlew
 
-          ./gradlew --no-daemon clean :app:assembleDebug
+          ./gradlew --no-daemon clean :app:assembleRelease
 
-      - name: Upload APK
+      - name: Verify Release APK
+        shell: bash
+        run: |
+          set -e
+
+          APK_PATH="$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk"
+
+          if [ ! -f "$APK_PATH" ]; then
+            echo "ERROR: Signed release APK not found."
+            exit 1
+          fi
+
+          echo "Release APK successfully created."
+          ls -lh "$APK_PATH"
+
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: baatly-debug-apk
-          path: "${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk"
+          name: baatly-release-apk
+          path: "${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/app-release.apk"
           if-no-files-found: error
           retention-days: 7
+
+      - name: Cleanup signing keystore
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/baatly-upload.jks"
