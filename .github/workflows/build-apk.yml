@@ -1,4 +1,4 @@
- name: Build Baatly APK
+name: Build Baatly APK
 
 'on':
   workflow_dispatch:
