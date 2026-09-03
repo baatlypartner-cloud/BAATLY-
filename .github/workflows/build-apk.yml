@@ -1,6 +1,6 @@
  name: Build Baatly APK
 
-on:
+'on':
   workflow_dispatch:
   push:
     paths:
@@ -76,12 +76,16 @@ jobs:
 
       - name: Prepare release keystore
         shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -e
 
           KEYSTORE_FILE="$RUNNER_TEMP/baatly-upload.jks"
 
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$KEYSTORE_FILE"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
 
           if [ ! -s "$KEYSTORE_FILE" ]; then
             echo "ERROR: Keystore could not be created."
@@ -89,8 +93,8 @@ jobs:
           fi
 
           echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
-          echo "STORE_PASSWORD=${{ secrets.STORE_PASSWORD }}" >> "$GITHUB_ENV"
-          echo "KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Build Signed Release APK
         shell: bash
@@ -98,7 +102,6 @@ jobs:
           set -e
 
           cd "$PROJECT_DIR"
-
           chmod +x gradlew
 
           ./gradlew --no-daemon clean :app:assembleRelease
