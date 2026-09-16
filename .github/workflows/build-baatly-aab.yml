@@ -4,155 +4,365 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "**.zip"
+      - "**/*.zip"
       - ".github/workflows/build-baatly-aab.yml"
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build Baatly Release AAB
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------
+      # 1. Checkout
+      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find uploaded ZIP
+      # ------------------------------------------------------------
+      # 2. Find exactly one source ZIP
+      # ------------------------------------------------------------
+      - name: Find Baatly source ZIP
         id: zip
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" | head -n 1)
+          mapfile -t ZIP_FILES < <(
+            find . -maxdepth 3 -type f \
+              -iname "*.zip" \
+              ! -path "./.git/*" \
+              | sort
+          )
 
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found in repository."
+          echo "ZIP files found:"
+          printf '%s\n' "${ZIP_FILES[@]:-<none>}"
+
+          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
+            echo "ERROR: No source ZIP found."
             exit 1
           fi
 
-          echo "Found ZIP: $ZIP_FILE"
+          if [ "${#ZIP_FILES[@]}" -ne 1 ]; then
+            echo "ERROR: Expected exactly ONE source ZIP."
+            echo "Found ${#ZIP_FILES[@]} ZIP files."
+            echo "Keep only the current Baatly User source ZIP in the repository."
+            exit 1
+          fi
+
+          ZIP_FILE="${ZIP_FILES[0]}"
+
+          echo "Using source ZIP:"
+          echo "$ZIP_FILE"
+
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Extract source ZIP
+      # ------------------------------------------------------------
+      # 3. Extract source
+      # ------------------------------------------------------------
+      - name: Extract Baatly source
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           rm -rf source
           mkdir -p source
 
           unzip -q "${{ steps.zip.outputs.zip_file }}" -d source
 
-          echo "Extracted project:"
-          find source -maxdepth 3 -type f | head -100
+          echo "Source extracted successfully."
 
+          echo "Top-level extracted files:"
+          find source -maxdepth 3 -type f \
+            ! -path "*/build/*" \
+            | sort \
+            | head -200
+
+      # ------------------------------------------------------------
+      # 4. Locate Android project
+      # ------------------------------------------------------------
       - name: Locate Android project
         id: project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          GRADLE_FILE=$(find source -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1)
+          GRADLEW_FILES=()
 
-          if [ -z "$GRADLE_FILE" ]; then
-            echo "ERROR: Android Gradle project not found."
+          while IFS= read -r file; do
+            GRADLEW_FILES+=("$file")
+          done < <(
+            find source -type f -name "gradlew" \
+              ! -path "*/build/*" \
+              | sort
+          )
+
+          if [ "${#GRADLEW_FILES[@]}" -eq 0 ]; then
+            echo "ERROR: gradlew not found."
+
+            echo "Searching for Gradle project files:"
+            find source -type f \
+              \( \
+                -name "settings.gradle" \
+                -o -name "settings.gradle.kts" \
+                -o -name "build.gradle" \
+                -o -name "build.gradle.kts" \
+              \) \
+              ! -path "*/build/*" \
+              | sort
+
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$GRADLE_FILE")
+          if [ "${#GRADLEW_FILES[@]}" -ne 1 ]; then
+            echo "ERROR: Multiple gradlew files found:"
+            printf '%s\n' "${GRADLEW_FILES[@]}"
+            exit 1
+          fi
 
-          echo "Android project found at: $PROJECT_DIR"
+          GRADLEW="${GRADLEW_FILES[0]}"
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+
+          echo "Android project directory:"
+          echo "$PROJECT_DIR"
+
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Java
+      # ------------------------------------------------------------
+      # 5. Setup Java 17
+      # ------------------------------------------------------------
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
 
+      # ------------------------------------------------------------
+      # 6. Setup Android SDK
+      # ------------------------------------------------------------
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
-      - name: Decode release keystore
+      # ------------------------------------------------------------
+      # 7. Install required Android SDK packages
+      # ------------------------------------------------------------
+      - name: Install required Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sdkmanager "platform-tools" \
+                     "platforms;android-36.1" \
+                     "build-tools;36.0.0"
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          echo "Required Android SDK packages installed."
+
+      # ------------------------------------------------------------
+      # 8. Verify Android SDK
+      # ------------------------------------------------------------
+      - name: Verify Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "ANDROID_HOME=${ANDROID_HOME:-<unset>}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-<unset>}"
+
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+
+          if [ -z "$SDK_ROOT" ]; then
+            echo "ERROR: Android SDK root not detected."
+            exit 1
+          fi
+
+          test -d "$SDK_ROOT/platform-tools" || {
+            echo "ERROR: platform-tools missing."
+            exit 1
+          }
+
+          test -d "$SDK_ROOT/platforms/android-36.1" || {
+            echo "ERROR: Android platform 36.1 missing."
+            exit 1
+          }
+
+          test -d "$SDK_ROOT/build-tools/36.0.0" || {
+            echo "ERROR: Build Tools 36.0.0 missing."
+            exit 1
+          }
+
+          echo "Android SDK verification PASSED."
+
+      # ------------------------------------------------------------
+      # 9. Verify signing secrets
+      # ------------------------------------------------------------
+      - name: Verify signing secrets
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
-          set -e
+          set -euo pipefail
 
-          if [ -z "$KEYSTORE_BASE64" ]; then
+          test -n "${KEYSTORE_BASE64:-}" || {
             echo "ERROR: KEYSTORE_BASE64 secret is missing."
             exit 1
-          fi
+          }
 
-          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/baatly-release.jks"
-
-          if [ ! -s "$RUNNER_TEMP/baatly-release.jks" ]; then
-            echo "ERROR: Keystore file was not created."
+          test -n "${KEY_PASSWORD:-}" || {
+            echo "ERROR: KEY_PASSWORD secret is missing."
             exit 1
-          fi
+          }
 
-          echo "Keystore created successfully."
+          test -n "${STORE_PASSWORD:-}" || {
+            echo "ERROR: STORE_PASSWORD secret is missing."
+            exit 1
+          }
 
-      - name: Verify Gradle wrapper
+          echo "Signing secrets verified."
+
+      # ------------------------------------------------------------
+      # 10. Decode release keystore
+      # ------------------------------------------------------------
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KEYSTORE_PATH="$RUNNER_TEMP/baatly-release.jks"
+
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+
+          test -s "$KEYSTORE_PATH" || {
+            echo "ERROR: Release keystore file is empty."
+            exit 1
+          }
+
+          echo "Release keystore created."
+          echo "keystore_path=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------
+      # 11. Prepare Gradle
+      # ------------------------------------------------------------
+      - name: Prepare Gradle
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
-          if [ ! -f "./gradlew" ]; then
-            echo "ERROR: gradlew not found."
+          set -euo pipefail
+
+          test -f "./gradlew" || {
+            echo "ERROR: gradlew missing."
             exit 1
-          fi
+          }
 
           chmod +x ./gradlew
 
-      - name: Build signed Release AAB
+          ./gradlew --version
+
+      # ------------------------------------------------------------
+      # 12. Build Release AAB
+      # ------------------------------------------------------------
+      - name: Build Release AAB
         working-directory: ${{ steps.project.outputs.project_dir }}
         env:
-          KEYSTORE_PATH: ${{ runner.temp }}/baatly-release.jks
+          KEYSTORE_PATH: ${{ env.keystore_path }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          if [ -z "$KEY_PASSWORD" ]; then
-            echo "ERROR: KEY_PASSWORD secret is missing."
-            exit 1
-          fi
+          echo "Starting Baatly User Release AAB build..."
 
-          if [ -z "$STORE_PASSWORD" ]; then
-            echo "ERROR: STORE_PASSWORD secret is missing."
-            exit 1
-          fi
+          ./gradlew clean bundleRelease \
+            --no-daemon \
+            --stacktrace
 
-          ./gradlew clean bundleRelease --no-daemon --stacktrace
+          echo "Gradle Release AAB build completed."
 
-      - name: Find generated AAB
+      # ------------------------------------------------------------
+      # 13. Locate AAB
+      # ------------------------------------------------------------
+      - name: Locate generated AAB
         id: aab
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          AAB_FILE=$(find app/build/outputs/bundle -type f -name "*.aab" | head -n 1)
+          mapfile -t AAB_FILES < <(
+            find . \
+              -type f \
+              -path "*/build/outputs/bundle/*/*.aab" \
+              | sort
+          )
 
-          if [ -z "$AAB_FILE" ]; then
-            echo "ERROR: Release AAB was not generated."
+          if [ "${#AAB_FILES[@]}" -eq 0 ]; then
+            echo "ERROR: No AAB generated."
+
+            echo "Available build outputs:"
+            find . -type f \
+              -path "*/build/outputs/*" \
+              | sort \
+              | head -300
+
             exit 1
           fi
 
-          echo "AAB generated: $AAB_FILE"
+          echo "Generated AAB files:"
+          printf '%s\n' "${AAB_FILES[@]}"
+
+          # Use the first deterministic sorted AAB.
+          AAB_FILE="${AAB_FILES[0]}"
+          AAB_FILE="${AAB_FILE#./}"
+
+          echo "Selected AAB:"
+          echo "$AAB_FILE"
+
           echo "aab_file=$AAB_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Upload AAB artifact
+      # ------------------------------------------------------------
+      # 14. Upload AAB
+      # ------------------------------------------------------------
+      - name: Upload Baatly Release AAB
         uses: actions/upload-artifact@v4
         with:
           name: baatly-release-aab
           path: ${{ steps.project.outputs.project_dir }}/${{ steps.aab.outputs.aab_file }}
+          if-no-files-found: error
+          retention-days: 30
 
-      - name: Upload mapping files if available
+      # ------------------------------------------------------------
+      # 15. Upload mapping
+      # ------------------------------------------------------------
+      - name: Upload Baatly mapping files
         uses: actions/upload-artifact@v4
         with:
           name: baatly-mapping
           path: |
-            ${{ steps.project.outputs.project_dir }}/app/build/outputs/mapping/**
+            ${{ steps.project.outputs.project_dir }}/**/build/outputs/mapping/**
           if-no-files-found: ignore
+          retention-days: 30
+
+      # ------------------------------------------------------------
+      # 16. Final success
+      # ------------------------------------------------------------
+      - name: Build Success
+        shell: bash
+        run: |
+          echo "=============================================="
+          echo " BAATLY USER RELEASE AAB - SUCCESS"
+          echo "=============================================="
+          echo "Artifact: baatly-release-aab"
+          echo "Android SDK platform: 36.1"
+          echo "Android Build Tools: 36.0.0"
+          echo "Java: 17"
+          echo "=============================================="
