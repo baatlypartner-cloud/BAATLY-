@@ -1,8 +1,9 @@
 name: Build Baatly Release APK
 
 on:
-  push:
   workflow_dispatch:
+
+  push:
 
 permissions:
   contents: read
@@ -23,74 +24,11 @@ jobs:
         uses: actions/checkout@v6
 
 
-      - name: Setup JDK 17
+      - name: Setup Java 17
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
-
-
-      - name: Find Android SDK manager
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" \
-            -type f \
-            -name sdkmanager \
-            -perm -111 \
-            2>/dev/null \
-            | head -n 1 || true)"
-
-          if [ -z "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_SDK_ROOT" \
-              -type f \
-              -name sdkmanager \
-              -perm -111 \
-              2>/dev/null \
-              | head -n 1 || true)"
-          fi
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "ERROR: sdkmanager not found."
-            exit 1
-          fi
-
-          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
-
-          echo "$(dirname "$SDKMANAGER")" >> "$GITHUB_PATH"
-
-          echo "Using sdkmanager:"
-          echo "$SDKMANAGER"
-
-          "$SDKMANAGER" --version
-
-
-      - name: Accept Android SDK licenses
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          yes | "$SDKMANAGER" \
-            --sdk_root="$ANDROID_SDK_ROOT" \
-            --licenses \
-            >/dev/null 2>&1 || true
-
-
-      - name: Install required Android SDK packages
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Installing Android SDK packages..."
-
-          "$SDKMANAGER" \
-            --sdk_root="$ANDROID_SDK_ROOT" \
-            "platform-tools" \
-            "platforms;android-36.1" \
-            "build-tools;36.0.0"
-
-          echo "Android SDK installation complete."
 
 
       - name: Find Baatly ZIP
@@ -107,25 +45,21 @@ jobs:
               | sort
           )
 
-          echo "ZIP files found: ${#ZIP_FILES[@]}"
-
           if [ "${#ZIP_FILES[@]}" -ne 1 ]; then
-            echo "ERROR: Exactly one ZIP file is required."
-
+            echo "ERROR: Exactly ONE Baatly ZIP is required."
+            echo
+            echo "ZIP files found:"
             printf '%s\n' "${ZIP_FILES[@]}"
-
             exit 1
           fi
 
-          SOURCE_ZIP="${ZIP_FILES[0]}"
+          echo "SOURCE_ZIP=${ZIP_FILES[0]}" >> "$GITHUB_ENV"
 
-          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
-
-          echo "Selected Baatly ZIP:"
-          echo "$SOURCE_ZIP"
+          echo "Using:"
+          echo "${ZIP_FILES[0]}"
 
 
-      - name: Verify ZIP integrity
+      - name: Verify ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -138,21 +72,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          EXTRACT_DIR="$RUNNER_TEMP/baatly-project"
+          EXTRACT_DIR="$RUNNER_TEMP/baatly"
 
           rm -rf "$EXTRACT_DIR"
 
           mkdir -p "$EXTRACT_DIR"
 
-          unzip -q "$SOURCE_ZIP" \
-            -d "$EXTRACT_DIR"
+          unzip -q "$SOURCE_ZIP" -d "$EXTRACT_DIR"
 
           echo "EXTRACT_DIR=$EXTRACT_DIR" >> "$GITHUB_ENV"
 
-          echo "ZIP extracted."
 
-
-      - name: Locate actual Gradle project
+      - name: Locate Gradle project
         shell: bash
         run: |
           set -euo pipefail
@@ -165,118 +96,73 @@ jobs:
               | sort
           )
 
-          echo "gradlew files found: ${#GRADLEW_FILES[@]}"
-
           if [ "${#GRADLEW_FILES[@]}" -ne 1 ]; then
-            echo "ERROR: Expected exactly one gradlew inside ZIP."
-
+            echo "ERROR: Expected exactly one gradlew."
             printf '%s\n' "${GRADLEW_FILES[@]}"
-
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "${GRADLEW_FILES[0]}")"
 
           test -f "$PROJECT_DIR/settings.gradle.kts"
-
           test -f "$PROJECT_DIR/build.gradle.kts"
-
           test -f "$PROJECT_DIR/app/build.gradle.kts"
-
           test -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"
 
           chmod +x "$PROJECT_DIR/gradlew"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Actual Android project:"
+          echo "Baatly project:"
           echo "$PROJECT_DIR"
 
 
-      - name: Prepare Baatly build configuration
-        working-directory: ${{ env.PROJECT_DIR }}
+      - name: Find Android SDK
         shell: bash
         run: |
           set -euo pipefail
 
-          APP="app/build.gradle.kts"
+          SDKMANAGER="$(
+            find "$ANDROID_SDK_ROOT/cmdline-tools" \
+              -type f \
+              -name sdkmanager \
+              -perm -111 \
+              2>/dev/null \
+              | head -n 1 || true
+          )"
 
-          ROOT="build.gradle.kts"
-
-          CATALOG="gradle/libs.versions.toml"
-
-
-          echo "Applying CI build fixes..."
-
-
-          # Java 11 -> Java 17
-          sed -i \
-            's/JavaVersion.VERSION_11/JavaVersion.VERSION_17/g' \
-            "$APP"
-
-
-          # Remove KSP plugin from app
-          sed -i \
-            '/google.devtools.ksp/d' \
-            "$APP"
-
-
-          # Remove KSP plugin from root build file
-          sed -i \
-            '/google.devtools.ksp/d' \
-            "$ROOT"
-
-
-          # Remove Moshi KSP dependency
-          sed -i \
-            '/moshi.kotlin.codegen/d' \
-            "$APP"
-
-
-          # Remove unused KSP entries from version catalog
-          sed -i \
-            '/googleDevtoolsKsp[[:space:]]*=/d' \
-            "$CATALOG"
-
-          sed -i \
-            '/google-devtools-ksp[[:space:]]*=/d' \
-            "$CATALOG"
-
-
-          # Remove unused Moshi codegen version/dependency
-          sed -i \
-            '/moshiKotlinCodegen[[:space:]]*=/d' \
-            "$CATALOG"
-
-          sed -i \
-            '/moshi-kotlin-codegen[[:space:]]*=/d' \
-            "$CATALOG"
-
-
-          # Add Kotlin JVM 17 target
-          if ! grep -q \
-            'jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)' \
-            "$APP"; then
-
-            printf '\n' >> "$APP"
-            printf 'kotlin {\n' >> "$APP"
-            printf '    compilerOptions {\n' >> "$APP"
-            printf '        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)\n' >> "$APP"
-            printf '    }\n' >> "$APP"
-            printf '}\n' >> "$APP"
-
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(
+              find "$ANDROID_SDK_ROOT" \
+                -type f \
+                -name sdkmanager \
+                -perm -111 \
+                2>/dev/null \
+                | head -n 1 || true
+            )"
           fi
 
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found."
+            exit 1
+          fi
 
-          echo "Baatly build configuration prepared."
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+          echo "Using sdkmanager:"
+          echo "$SDKMANAGER"
 
 
-      - name: Verify Java
+      - name: Install Android SDK
         shell: bash
         run: |
           set -euo pipefail
 
-          java -version
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools" \
+            "platforms;android-36.1" \
+            "build-tools;36.0.0"
 
 
       - name: Check signing secrets
@@ -290,22 +176,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "ERROR: KEYSTORE_BASE64 secret is missing."
+          test -n "$KEYSTORE_BASE64" || {
+            echo "KEYSTORE_BASE64 missing"
             exit 1
-          fi
+          }
 
-          if [ -z "$STORE_PASSWORD" ]; then
-            echo "ERROR: STORE_PASSWORD secret is missing."
+          test -n "$STORE_PASSWORD" || {
+            echo "STORE_PASSWORD missing"
             exit 1
-          fi
+          }
 
-          if [ -z "$KEY_PASSWORD" ]; then
-            echo "ERROR: KEY_PASSWORD secret is missing."
+          test -n "$KEY_PASSWORD" || {
+            echo "KEY_PASSWORD missing"
             exit 1
-          fi
-
-          echo "Release signing secrets are present."
+          }
 
 
       - name: Restore release keystore
@@ -323,17 +207,12 @@ jobs:
             | base64 --decode \
             > my-upload-key.jks
 
-          if [ ! -s my-upload-key.jks ]; then
-            echo "ERROR: Keystore was not restored."
-            exit 1
-          fi
+          test -s my-upload-key.jks
 
           echo "KEYSTORE_PATH=$PWD/my-upload-key.jks" >> "$GITHUB_ENV"
 
-          echo "Release keystore restored."
 
-
-      - name: Verify release keystore
+      - name: Verify keystore
         working-directory: ${{ env.PROJECT_DIR }}
 
         env:
@@ -351,10 +230,10 @@ jobs:
             -alias upload \
             >/dev/null
 
-          echo "Release keystore verified."
+          echo "Keystore verified."
 
 
-      - name: Verify Gradle wrapper
+      - name: Verify Gradle
         working-directory: ${{ env.PROJECT_DIR }}
 
         shell: bash
@@ -362,22 +241,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          chmod +x ./gradlew
+          java -version
 
           ./gradlew --version
-
-
-      - name: Clean Baatly project
-        working-directory: ${{ env.PROJECT_DIR }}
-
-        shell: bash
-
-        run: |
-          set -euo pipefail
-
-          ./gradlew clean \
-            --no-daemon \
-            --stacktrace
 
 
       - name: Build Baatly Release APK
@@ -391,19 +257,40 @@ jobs:
         shell: bash
 
         run: |
-          set -euo pipefail
+          set -o pipefail
 
-          echo "=============================================="
-          echo "       BAATLY RELEASE APK BUILD"
-          echo "=============================================="
+          echo "=========================================="
+          echo "BAATLY RELEASE APK BUILD"
+          echo "=========================================="
 
           ./gradlew :app:assembleRelease \
             --no-daemon \
             --stacktrace \
-            --warning-mode all
+            --info \
+            --warning-mode all \
+            2>&1 | tee "$RUNNER_TEMP/baatly-build.log"
+
+          EXIT_CODE=${PIPESTATUS[0]}
+
+          if [ "$EXIT_CODE" -ne 0 ]; then
+            echo
+            echo "=========================================="
+            echo "KOTLIN/GRADLE BUILD FAILED"
+            echo "=========================================="
+            echo
+
+            echo "Compiler errors:"
+            grep -n -E \
+              "e: |error: |Unresolved reference|unresolved reference|Compilation error" \
+              "$RUNNER_TEMP/baatly-build.log" \
+              | tail -100 \
+              || true
+
+            exit "$EXIT_CODE"
+          fi
 
 
-      - name: Verify generated APK
+      - name: Verify APK
         working-directory: ${{ env.PROJECT_DIR }}
 
         shell: bash
@@ -416,19 +303,15 @@ jobs:
           if [ ! -f "$APK" ]; then
             echo "ERROR: APK was not generated."
 
-            echo "Searching for APK files..."
-
             find . \
               -type f \
               -name "*.apk" \
-              -print \
-              || true
+              -print
 
             exit 1
           fi
 
-          echo "APK generated successfully:"
-
+          echo "APK generated:"
           ls -lh "$APK"
 
 
@@ -444,20 +327,12 @@ jobs:
 
           APKSIGNER="$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
 
-          if [ ! -f "$APKSIGNER" ]; then
-            echo "ERROR: apksigner not found."
-            exit 1
-          fi
-
-          "$APKSIGNER" \
-            verify \
+          "$APKSIGNER" verify \
             --verbose \
             "$APK"
 
-          echo "APK signature verification PASSED."
 
-
-      - name: Upload Baatly Release APK
+      - name: Upload Baatly APK
         uses: actions/upload-artifact@v4
 
         with:
@@ -468,14 +343,3 @@ jobs:
           if-no-files-found: error
 
           retention-days: 30
-
-
-      - name: Build Success
-        shell: bash
-        run: |
-          echo
-          echo "=============================================="
-          echo "      BAATLY RELEASE APK BUILD SUCCESS"
-          echo "=============================================="
-          echo
-          echo "Artifact: baatly-release-apk"
