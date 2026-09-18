@@ -13,14 +13,12 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
 
     steps:
 
       # ============================================================
-      # 1. CHECKOUT
+      # 1. CHECKOUT GITHUB REPOSITORY
       # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -30,14 +28,30 @@ jobs:
       # 2. JAVA 17
       # ============================================================
       - name: Setup Java 17
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
 
       # ============================================================
-      # 3. FIND THE SINGLE BAATLY ZIP
+      # 3. ANDROID SDK
+      #
+      # IMPORTANT:
+      # No "yes | sdkmanager" here.
+      # This avoids the Broken pipe error from previous run.
+      # ============================================================
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: |
+            platform-tools
+            platforms;android-36.1
+            build-tools;36.0.0
+
+
+      # ============================================================
+      # 4. FIND THE SINGLE ZIP
       # ============================================================
       - name: Find Baatly ZIP
         shell: bash
@@ -57,7 +71,7 @@ jobs:
 
           if [ "${#ZIP_FILES[@]}" -ne 1 ]; then
             echo ""
-            echo "ERROR: Exactly ONE Baatly ZIP is required."
+            echo "ERROR: Exactly ONE ZIP file is required."
             echo "Found ${#ZIP_FILES[@]} ZIP file(s)."
             exit 1
           fi
@@ -72,21 +86,22 @@ jobs:
 
 
       # ============================================================
-      # 4. VERIFY ZIP
+      # 5. VERIFY ZIP
       # ============================================================
       - name: Verify ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Testing ZIP:"
-          echo "$SOURCE_ZIP"
-
+          echo "Testing ZIP integrity..."
           unzip -t "$SOURCE_ZIP"
+
+          echo ""
+          echo "ZIP is valid."
 
 
       # ============================================================
-      # 5. EXTRACT ZIP AUTOMATICALLY
+      # 6. EXTRACT ZIP
       # ============================================================
       - name: Extract Baatly ZIP
         shell: bash
@@ -99,16 +114,17 @@ jobs:
           mkdir -p "$EXTRACT_DIR"
 
           echo "Extracting Baatly ZIP..."
+
           unzip -q "$SOURCE_ZIP" -d "$EXTRACT_DIR"
 
           echo ""
-          echo "Extraction complete."
+          echo "Extraction completed."
 
           echo "EXTRACT_DIR=$EXTRACT_DIR" >> "$GITHUB_ENV"
 
 
       # ============================================================
-      # 6. LOCATE ACTUAL GRADLE PROJECT INSIDE ZIP
+      # 7. LOCATE ACTUAL GRADLE PROJECT INSIDE ZIP
       # ============================================================
       - name: Locate Gradle project
         shell: bash
@@ -126,19 +142,21 @@ jobs:
 
           if [ "${#GRADLEW_FILES[@]}" -ne 1 ]; then
             echo ""
-            echo "ERROR: Expected exactly one gradlew."
+            echo "ERROR: Expected exactly ONE gradlew."
             echo "Found:"
             printf '%s\n' "${GRADLEW_FILES[@]}"
             exit 1
           fi
 
           GRADLEW="${GRADLEW_FILES[0]}"
+
           PROJECT_DIR="$(dirname "$GRADLEW")"
 
           echo ""
-          echo "PROJECT_DIR:"
+          echo "Baatly project:"
           echo "$PROJECT_DIR"
 
+          # Required project files
           test -f "$PROJECT_DIR/settings.gradle.kts"
           test -f "$PROJECT_DIR/build.gradle.kts"
           test -f "$PROJECT_DIR/app/build.gradle.kts"
@@ -154,64 +172,38 @@ jobs:
 
 
       # ============================================================
-      # 7. FIND ANDROID SDKMANAGER
+      # 8. VERIFY ANDROID SDK
       # ============================================================
-      - name: Find Android SDK
+      - name: Verify required Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Searching for sdkmanager..."
+          echo "ANDROID_SDK_ROOT:"
+          echo "$ANDROID_SDK_ROOT"
 
-          SDKMANAGER="$(
-            find "$ANDROID_SDK_ROOT/cmdline-tools" \
-              -type f \
-              -name "sdkmanager" \
-              -perm -111 \
-              2>/dev/null | head -n 1 || true
-          )"
+          echo ""
+          echo "Checking Android 36.1 platform..."
 
-          if [ -z "$SDKMANAGER" ]; then
-            SDKMANAGER="$(
-              find "$ANDROID_SDK_ROOT" \
-                -type f \
-                -name "sdkmanager" \
-                -perm -111 \
-                2>/dev/null | head -n 1 || true
-            )"
+          if [ ! -d "$ANDROID_SDK_ROOT/platforms/android-36.1" ]; then
+            echo "ERROR: Android SDK Platform 36.1 not found."
+            exit 1
           fi
 
-          if [ -z "$SDKMANAGER" ]; then
-            echo ""
-            echo "ERROR: sdkmanager not found."
+          echo "Checking build-tools 36.0.0..."
+
+          if [ ! -x "$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt2" ]; then
+            echo "ERROR: Android Build Tools 36.0.0 not found."
+            exit 1
+          fi
+
+          if [ ! -x "$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner" ]; then
+            echo "ERROR: apksigner not found."
             exit 1
           fi
 
           echo ""
-          echo "Using sdkmanager:"
-          echo "$SDKMANAGER"
-
-          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
-
-
-      # ============================================================
-      # 8. INSTALL REQUIRED ANDROID SDK
-      # ============================================================
-      - name: Install Android SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Installing Android SDK components..."
-
-          yes | "$SDKMANAGER" \
-            --sdk_root="$ANDROID_SDK_ROOT" \
-            "platform-tools" \
-            "platforms;android-36.1" \
-            "build-tools;36.0.0"
-
-          echo ""
-          echo "Android SDK installation complete."
+          echo "Android SDK verified successfully."
 
 
       # ============================================================
@@ -259,7 +251,10 @@ jobs:
 
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
 
-          test -s my-upload-key.jks
+          if [ ! -s my-upload-key.jks ]; then
+            echo "ERROR: Keystore file is empty."
+            exit 1
+          fi
 
           echo "Keystore restored."
 
@@ -277,8 +272,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Checking keystore..."
-
           keytool -list \
             -keystore my-upload-key.jks \
             -storepass "$STORE_PASSWORD" \
@@ -288,19 +281,21 @@ jobs:
 
 
       # ============================================================
-      # 12. FIX THE ACTUAL KOTLIN ERROR
+      # 12. FIX CONFIRMED GiftBottomSheet.kt ERROR
       #
-      # GiftBottomSheet.kt had:
+      # Actual ZIP has:
+      #
+      # GiftItem.priceRupees
+      #
+      # But GiftBottomSheet.kt had:
       #
       # gift.coinPrice
       #
-      # But GiftItem actually contains:
+      # at line 99 and line 159.
       #
-      # priceRupees
-      #
-      # This automatically fixes both failing lines.
+      # We change ONLY those confirmed references.
       # ============================================================
-      - name: Fix GiftBottomSheet coinPrice error
+      - name: Fix confirmed GiftBottomSheet compile errors
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
@@ -308,14 +303,13 @@ jobs:
 
           FILE="app/src/main/java/com/example/ui/gift/GiftBottomSheet.kt"
 
-          echo "Checking:"
+          echo "Checking source file:"
           echo "$FILE"
 
           if [ ! -f "$FILE" ]; then
             echo ""
-            echo "ERROR: GiftBottomSheet.kt was not found."
+            echo "ERROR: GiftBottomSheet.kt not found."
             echo ""
-            echo "Searching for it:"
             find app/src -type f -name "GiftBottomSheet.kt" -print
             exit 1
           fi
@@ -324,10 +318,11 @@ jobs:
           import sys
           from pathlib import Path
 
-          file = Path(sys.argv[1])
+          path = Path(sys.argv[1])
 
-          text = file.read_text(encoding="utf-8")
+          text = path.read_text(encoding="utf-8")
 
+          # Confirmed line from the actual ZIP
           old1 = (
               "val giftPrice = if (gift.priceRupees > 0.0) "
               "gift.priceRupees else gift.coinPrice.toDouble()"
@@ -337,7 +332,15 @@ jobs:
               "val giftPrice = gift.priceRupees"
           )
 
+          # Confirmed second line from the actual ZIP
           old2 = (
+              "val selectedPrice = selectedGift?.let { "
+              "if (it.priceRupees > 0.0) gift.priceRupees "
+              "else it.coinPrice.toDouble() } ?: 0.0"
+          )
+
+          # Actual source uses it.priceRupees, so use the exact real line too.
+          old2_real = (
               "val selectedPrice = selectedGift?.let { "
               "if (it.priceRupees > 0.0) it.priceRupees "
               "else it.coinPrice.toDouble() } ?: 0.0"
@@ -347,63 +350,78 @@ jobs:
               "val selectedPrice = selectedGift?.priceRupees ?: 0.0"
           )
 
-          changed = False
+          if old1 not in text:
+              raise SystemExit(
+                  "ERROR: Expected giftPrice coinPrice line was not found."
+              )
 
-          if old1 in text:
-              text = text.replace(old1, new1)
-              changed = True
-              print("Fixed giftPrice coinPrice reference.")
-          else:
-              print("giftPrice pattern already fixed or not found.")
-
-          if old2 in text:
+          if old2_real in text:
+              text = text.replace(old2_real, new2)
+          elif old2 in text:
               text = text.replace(old2, new2)
-              changed = True
-              print("Fixed selectedPrice coinPrice reference.")
           else:
-              print("selectedPrice pattern already fixed or not found.")
+              raise SystemExit(
+                  "ERROR: Expected selectedPrice coinPrice line was not found."
+              )
 
-          file.write_text(text, encoding="utf-8")
+          text = text.replace(old1, new1)
+
+          path.write_text(text, encoding="utf-8")
 
           print("")
-          print("GiftBottomSheet.kt processing complete.")
+          print("GiftBottomSheet.kt fixed successfully.")
           PY
 
           echo ""
-          echo "Checking remaining coinPrice references..."
+          echo "Checking for remaining coinPrice references..."
 
-          if grep -n "coinPrice" "$FILE"; then
+          if grep -n -E '\bcoinPrice\b' "$FILE"; then
             echo ""
-            echo "ERROR: coinPrice reference still exists."
+            echo "ERROR: coinPrice still exists in GiftBottomSheet.kt."
             exit 1
-          else
-            echo "No coinPrice references remain."
           fi
 
-          echo ""
-          echo "Relevant code after automatic fix:"
-          nl -ba "$FILE" | sed -n '95,103p;155,163p'
+          echo "No coinPrice references remain."
 
 
       # ============================================================
-      # 13. VERIFY GRADLE
+      # 13. SHOW FIXED SOURCE
       # ============================================================
-      - name: Verify Gradle
+      - name: Verify fixed GiftBottomSheet
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Java version:"
+          FILE="app/src/main/java/com/example/ui/gift/GiftBottomSheet.kt"
+
+          echo "Relevant section around gift price:"
+          nl -ba "$FILE" | sed -n '94,104p'
+
+          echo ""
+          echo "Relevant section around selected price:"
+          nl -ba "$FILE" | sed -n '154,163p'
+
+
+      # ============================================================
+      # 14. VERIFY GRADLE
+      # ============================================================
+      - name: Verify Gradle wrapper
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Java:"
           java -version
 
           echo ""
-          echo "Gradle version:"
+          echo "Gradle:"
           ./gradlew --version
 
 
       # ============================================================
-      # 14. BUILD RELEASE APK
+      # 15. BUILD RELEASE APK
       # ============================================================
       - name: Build Baatly Release APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -416,15 +434,15 @@ jobs:
           set -o pipefail
 
           echo ""
-          echo "=========================================="
-          echo "       BAATLY RELEASE APK BUILD"
-          echo "=========================================="
+          echo "=============================================="
+          echo "         BAATLY RELEASE APK BUILD"
+          echo "=============================================="
           echo ""
 
           ./gradlew :app:assembleRelease \
             --no-daemon \
             --stacktrace \
-            --info \
+            --console=plain \
             --warning-mode all \
             2>&1 | tee "$RUNNER_TEMP/baatly-build.log"
 
@@ -433,34 +451,37 @@ jobs:
           if [ "$EXIT_CODE" -ne 0 ]; then
 
             echo ""
-            echo "=========================================="
-            echo "          BAATLY BUILD FAILED"
-            echo "=========================================="
+            echo "=============================================="
+            echo "             BAATLY BUILD FAILED"
+            echo "=============================================="
             echo ""
 
-            echo "Compiler errors:"
+            echo "REAL COMPILER ERRORS:"
             echo ""
 
             grep -n -E \
-              "e: |error: |Unresolved reference|unresolved reference|Compilation error|FAILURE:" \
-              "$RUNNER_TEMP/baatly-build.log" | tail -150 || true
+              "e: |error: |Unresolved reference|unresolved reference|Type mismatch|Compilation error|FAILURE:" \
+              "$RUNNER_TEMP/baatly-build.log" \
+              | tail -200 || true
 
             echo ""
-            echo "Last 250 log lines:"
+            echo "LAST 250 LOG LINES:"
+            echo ""
+
             tail -250 "$RUNNER_TEMP/baatly-build.log" || true
 
             exit "$EXIT_CODE"
           fi
 
           echo ""
-          echo "=========================================="
+          echo "=============================================="
           echo "       GRADLE BUILD SUCCESSFUL"
-          echo "=========================================="
+          echo "=============================================="
           echo ""
 
 
       # ============================================================
-      # 15. VERIFY APK EXISTS
+      # 16. VERIFY APK
       # ============================================================
       - name: Verify APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -471,21 +492,30 @@ jobs:
           APK="app/build/outputs/apk/release/app-release.apk"
 
           if [ ! -f "$APK" ]; then
+
             echo ""
             echo "ERROR: APK was not generated."
             echo ""
-            echo "Searching for APK files:"
-            find . -type f -name "*.apk" -print
+
+            find app/build/outputs \
+              -type f \
+              -name "*.apk" \
+              -print || true
+
             exit 1
           fi
 
           echo ""
-          echo "APK generated successfully:"
+          echo "=============================================="
+          echo "            APK GENERATED"
+          echo "=============================================="
+          echo ""
+
           ls -lh "$APK"
 
 
       # ============================================================
-      # 16. VERIFY APK SIGNATURE
+      # 17. VERIFY APK SIGNATURE
       # ============================================================
       - name: Verify APK signature
         working-directory: ${{ env.PROJECT_DIR }}
@@ -497,21 +527,14 @@ jobs:
 
           APKSIGNER="$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
 
-          if [ ! -f "$APKSIGNER" ]; then
-            echo "ERROR: apksigner not found."
-            exit 1
-          fi
-
-          echo "Checking APK signature..."
-
           "$APKSIGNER" verify --verbose "$APK"
 
           echo ""
-          echo "APK signature verified."
+          echo "APK signature verified successfully."
 
 
       # ============================================================
-      # 17. UPLOAD APK AS GITHUB ARTIFACT
+      # 18. UPLOAD APK
       # ============================================================
       - name: Upload Baatly APK
         uses: actions/upload-artifact@v4
@@ -519,4 +542,4 @@ jobs:
           name: baatly-release-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
-          retention-days: 30 
+          retention-days: 30
