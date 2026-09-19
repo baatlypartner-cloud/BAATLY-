@@ -1,0 +1,176 @@
+name: Build Baatly User App AAB
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Signed Baatly User AAB
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      ZIP_FILE: "baatly - 2026-09-19T141237.053.zip"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Verify source ZIP exists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: Source ZIP not found:"
+            echo "$ZIP_FILE"
+            echo
+            echo "Files available in repository root:"
+            ls -la
+            exit 1
+          fi
+
+          echo "Source ZIP found:"
+          ls -lh "$ZIP_FILE"
+
+      - name: Prepare clean build directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$GITHUB_WORKSPACE/baatly-user-source"
+          mkdir -p "$GITHUB_WORKSPACE/baatly-user-source"
+
+          unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/baatly-user-source"
+
+          echo "Extracted project:"
+          ls -la "$GITHUB_WORKSPACE/baatly-user-source"
+
+          test -f "$GITHUB_WORKSPACE/baatly-user-source/gradlew"
+          test -f "$GITHUB_WORKSPACE/baatly-user-source/settings.gradle.kts"
+          test -d "$GITHUB_WORKSPACE/baatly-user-source/app"
+
+      - name: Prepare environment file
+        working-directory: ./baatly-user-source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f ".env.example" ]; then
+            cp .env.example .env
+          fi
+
+          echo "Environment file prepared."
+
+      - name: Prepare release signing keystore
+        working-directory: ./baatly-user-source
+        shell: bash
+        env:
+          BAATLY_UPLOAD_KEYSTORE_BASE64: ${{ secrets.BAATLY_UPLOAD_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${BAATLY_UPLOAD_KEYSTORE_BASE64:-}" ]; then
+            echo "ERROR: GitHub secret BAATLY_UPLOAD_KEYSTORE_BASE64 is missing."
+            exit 1
+          fi
+
+          echo "$BAATLY_UPLOAD_KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
+
+          if [ ! -s my-upload-key.jks ]; then
+            echo "ERROR: Keystore file was not created correctly."
+            exit 1
+          fi
+
+          echo "Release keystore prepared successfully."
+          ls -lh my-upload-key.jks
+
+      - name: Make Gradle executable
+        working-directory: ./baatly-user-source
+        shell: bash
+        run: |
+          chmod +x gradlew
+
+      - name: Check Gradle environment
+        working-directory: ./baatly-user-source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          java -version
+          ./gradlew --version
+
+      - name: Build signed release AAB
+        working-directory: ./baatly-user-source
+        shell: bash
+        env:
+          KEYSTORE_PATH: "${{ github.workspace }}/baatly-user-source/my-upload-key.jks"
+          STORE_PASSWORD: ${{ secrets.BAATLY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.BAATLY_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${STORE_PASSWORD:-}" ]; then
+            echo "ERROR: GitHub secret BAATLY_STORE_PASSWORD is missing."
+            exit 1
+          fi
+
+          if [ -z "${KEY_PASSWORD:-}" ]; then
+            echo "ERROR: GitHub secret BAATLY_KEY_PASSWORD is missing."
+            exit 1
+          fi
+
+          ./gradlew clean bundleRelease --no-daemon --stacktrace
+
+      - name: Verify generated AAB
+        working-directory: ./baatly-user-source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AAB_PATH="app/build/outputs/bundle/release/app-release.aab"
+
+          if [ ! -f "$AAB_PATH" ]; then
+            echo "ERROR: Release AAB was not generated."
+            find app/build -type f | sort || true
+            exit 1
+          fi
+
+          echo "Generated AAB:"
+          ls -lh "$AAB_PATH"
+
+          echo
+          echo "AAB size:"
+          du -h "$AAB_PATH"
+
+          echo
+          echo "Verifying AAB signature:"
+          jarsigner -verify -verbose -certs "$AAB_PATH"
+
+      - name: Rename final AAB
+        working-directory: ./baatly-user-source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp \
+            app/build/outputs/bundle/release/app-release.aab \
+            "$GITHUB_WORKSPACE/baatly-user-release-v12.aab"
+
+          ls -lh "$GITHUB_WORKSPACE/baatly-user-release-v12.aab"
+
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: baatly-user-release-v12
+          path: baatly-user-release-v12.aab
+          if-no-files-found: error
+          retention-days: 30
