@@ -1,4 +1,4 @@
-name: Baatly User App AAB
+name: Build Baatly User App AAB
 
 on:
   push:
@@ -14,38 +14,35 @@ jobs:
 
     steps:
 
-      # --------------------------------------------------
+      # --------------------------------------------
       # 1. Checkout repository
-      # --------------------------------------------------
+      # --------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # --------------------------------------------------
+      # --------------------------------------------
       # 2. Setup Java 17
-      # --------------------------------------------------
+      # --------------------------------------------
       - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      # --------------------------------------------------
+      # --------------------------------------------
       # 3. Check source ZIP
-      # --------------------------------------------------
-      - name: Find Baatly source ZIP
+      # --------------------------------------------
+      - name: Check source ZIP
         shell: bash
         run: |
           set -e
 
-          echo "Files in repository:"
-          ls -lah
-
           ZIP_FILE="baatly - 2026-09-19T141237.053.zip"
 
+          echo "Checking source ZIP..."
+
           if [ ! -f "$ZIP_FILE" ]; then
-            echo ""
-            echo "ERROR: Baatly source ZIP not found."
-            echo "Expected:"
+            echo "ERROR: Source ZIP not found:"
             echo "$ZIP_FILE"
             echo ""
             echo "Available ZIP files:"
@@ -53,13 +50,12 @@ jobs:
             exit 1
           fi
 
-          echo ""
           echo "Source ZIP found:"
           ls -lh "$ZIP_FILE"
 
-      # --------------------------------------------------
-      # 4. Extract source ZIP
-      # --------------------------------------------------
+      # --------------------------------------------
+      # 4. Extract ZIP
+      # --------------------------------------------
       - name: Extract Baatly project
         shell: bash
         run: |
@@ -72,12 +68,11 @@ jobs:
             "baatly - 2026-09-19T141237.053.zip" \
             -d baatly-source
 
-          echo "Extracted project:"
-          ls -lah baatly-source
+          echo "ZIP extracted successfully."
 
-      # --------------------------------------------------
-      # 5. Verify project structure
-      # --------------------------------------------------
+      # --------------------------------------------
+      # 5. Verify Android project
+      # --------------------------------------------
       - name: Verify Android project
         shell: bash
         run: |
@@ -98,11 +93,11 @@ jobs:
             exit 1
           fi
 
-          echo "Android project structure verified."
+          echo "Android project structure is valid."
 
-      # --------------------------------------------------
+      # --------------------------------------------
       # 6. Prepare Gradle
-      # --------------------------------------------------
+      # --------------------------------------------
       - name: Prepare Gradle wrapper
         shell: bash
         run: |
@@ -110,12 +105,11 @@ jobs:
 
           chmod +x baatly-source/gradlew
 
-          echo "Gradle wrapper:"
-          ls -lh baatly-source/gradlew
+          echo "Gradle wrapper prepared."
 
-      # --------------------------------------------------
-      # 7. Prepare .env
-      # --------------------------------------------------
+      # --------------------------------------------
+      # 7. Prepare environment
+      # --------------------------------------------
       - name: Prepare environment
         shell: bash
         run: |
@@ -125,24 +119,23 @@ jobs:
 
           if [ -f ".env.example" ]; then
             cp .env.example .env
-            echo ".env created from .env.example"
+            echo ".env created."
           else
-            echo "No .env.example found."
+            echo "No .env.example found. Continuing."
           fi
 
-      # --------------------------------------------------
-      # 8. Decode release keystore
-      # --------------------------------------------------
+      # --------------------------------------------
+      # 8. Prepare signing keystore
+      # --------------------------------------------
       - name: Prepare release keystore
         shell: bash
         env:
-          KEYSTORE_BASE64: ${{ secrets.BAATLY_UPLOAD_KEYSTORE_BASE64 }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           set -e
 
           if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "ERROR: Missing GitHub secret:"
-            echo "BAATLY_UPLOAD_KEYSTORE_BASE64"
+            echo "ERROR: GitHub Actions secret KEYSTORE_BASE64 is missing."
             exit 1
           fi
 
@@ -150,15 +143,15 @@ jobs:
             baatly-source/my-upload-key.jks
 
           if [ ! -s "baatly-source/my-upload-key.jks" ]; then
-            echo "ERROR: Keystore file is empty."
+            echo "ERROR: Keystore file was not created."
             exit 1
           fi
 
           echo "Release keystore prepared successfully."
 
-      # --------------------------------------------------
+      # --------------------------------------------
       # 9. Verify Java and Gradle
-      # --------------------------------------------------
+      # --------------------------------------------
       - name: Verify Java and Gradle
         shell: bash
         run: |
@@ -173,27 +166,25 @@ jobs:
           cd baatly-source
           ./gradlew --version
 
-      # --------------------------------------------------
+      # --------------------------------------------
       # 10. Build signed release AAB
-      # --------------------------------------------------
+      # --------------------------------------------
       - name: Build signed release AAB
         shell: bash
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/baatly-source/my-upload-key.jks
-          STORE_PASSWORD: ${{ secrets.BAATLY_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.BAATLY_KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -e
 
           if [ -z "$STORE_PASSWORD" ]; then
-            echo "ERROR: Missing GitHub secret:"
-            echo "BAATLY_STORE_PASSWORD"
+            echo "ERROR: GitHub Actions secret STORE_PASSWORD is missing."
             exit 1
           fi
 
           if [ -z "$KEY_PASSWORD" ]; then
-            echo "ERROR: Missing GitHub secret:"
-            echo "BAATLY_KEY_PASSWORD"
+            echo "ERROR: GitHub Actions secret KEY_PASSWORD is missing."
             exit 1
           fi
 
@@ -205,15 +196,13 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # --------------------------------------------------
-      # 11. Locate generated AAB
-      # --------------------------------------------------
-      - name: Locate AAB
+      # --------------------------------------------
+      # 11. Find generated AAB
+      # --------------------------------------------
+      - name: Locate generated AAB
         shell: bash
         run: |
           set -e
-
-          echo "Searching for AAB..."
 
           AAB_FILE=$(find \
             baatly-source/app/build/outputs/bundle \
@@ -222,7 +211,7 @@ jobs:
             -print -quit)
 
           if [ -z "$AAB_FILE" ]; then
-            echo "ERROR: No AAB file generated."
+            echo "ERROR: No AAB file was generated."
 
             echo ""
             echo "Build output:"
@@ -242,9 +231,9 @@ jobs:
           echo "Final AAB:"
           ls -lh baatly-user-release.aab
 
-      # --------------------------------------------------
-      # 12. Upload AAB artifact
-      # --------------------------------------------------
+      # --------------------------------------------
+      # 12. Upload AAB
+      # --------------------------------------------
       - name: Upload Baatly User AAB
         uses: actions/upload-artifact@v4
         with:
@@ -253,11 +242,12 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # --------------------------------------------------
-      # 13. Remove keystore
-      # --------------------------------------------------
+      # --------------------------------------------
+      # 13. Cleanup signing key
+      # --------------------------------------------
       - name: Cleanup keystore
         if: always()
         shell: bash
         run: |
-          rm -f baatly-source/my-upload-key.jks || true 
+          rm -f baatly-source/my-upload-key.jks || true
+          echo "Cleanup completed." 
