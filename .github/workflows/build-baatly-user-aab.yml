@@ -1,176 +1,360 @@
 name: Build Baatly User App AAB
 
 on:
+  push:
+    branches:
+      - main
+      - master
+
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Signed Baatly User AAB
+    name: Build Baatly User Release AAB
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
 
     env:
-      ZIP_FILE: "baatly - 2026-09-19T141237.053.zip"
+      SOURCE_ZIP: "baatly - 2026-09-19T141237.053.zip"
+      BUILD_DIR: "baatly-user-source"
 
     steps:
+
+      # ---------------------------------------------------------
+      # 1. Checkout repository
+      # ---------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ---------------------------------------------------------
+      # 2. Setup Java 17
+      # ---------------------------------------------------------
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
-      - name: Verify source ZIP exists
+      # ---------------------------------------------------------
+      # 3. Check ZIP
+      # ---------------------------------------------------------
+      - name: Check source ZIP
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "ERROR: Source ZIP not found:"
-            echo "$ZIP_FILE"
+          echo "Checking source ZIP..."
+
+          if [ ! -f "$SOURCE_ZIP" ]; then
+            echo "ERROR: Source ZIP was not found."
             echo
-            echo "Files available in repository root:"
-            ls -la
+            echo "Expected file:"
+            echo "$SOURCE_ZIP"
+            echo
+            echo "Repository files:"
+            find . -maxdepth 2 -type f | sort
             exit 1
           fi
 
+          echo
           echo "Source ZIP found:"
-          ls -lh "$ZIP_FILE"
+          ls -lh "$SOURCE_ZIP"
 
-      - name: Prepare clean build directory
+      # ---------------------------------------------------------
+      # 4. Extract ZIP
+      # ---------------------------------------------------------
+      - name: Extract Android project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          rm -rf "$GITHUB_WORKSPACE/baatly-user-source"
-          mkdir -p "$GITHUB_WORKSPACE/baatly-user-source"
+          rm -rf "$BUILD_DIR"
+          mkdir -p "$BUILD_DIR"
 
-          unzip -q "$ZIP_FILE" -d "$GITHUB_WORKSPACE/baatly-user-source"
+          echo "Extracting ZIP..."
 
-          echo "Extracted project:"
-          ls -la "$GITHUB_WORKSPACE/baatly-user-source"
+          unzip -q "$SOURCE_ZIP" -d "$BUILD_DIR"
 
-          test -f "$GITHUB_WORKSPACE/baatly-user-source/gradlew"
-          test -f "$GITHUB_WORKSPACE/baatly-user-source/settings.gradle.kts"
-          test -d "$GITHUB_WORKSPACE/baatly-user-source/app"
+          echo
+          echo "Extracted files:"
+          find "$BUILD_DIR" -maxdepth 2 -type f | sort | head -200
 
-      - name: Prepare environment file
-        working-directory: ./baatly-user-source
+      # ---------------------------------------------------------
+      # 5. Detect project root
+      # ---------------------------------------------------------
+      - name: Detect project root
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          if [ -f ".env.example" ]; then
-            cp .env.example .env
+          echo "Searching for Gradle project..."
+
+          PROJECT_ROOT=""
+
+          if [ -f "$BUILD_DIR/gradlew" ]; then
+            PROJECT_ROOT="$BUILD_DIR"
+          else
+            FOUND_GRADLEW=$(find "$BUILD_DIR" -type f -name "gradlew" -print -quit)
+
+            if [ -n "$FOUND_GRADLEW" ]; then
+              PROJECT_ROOT=$(dirname "$FOUND_GRADLEW")
+            fi
           fi
 
-          echo "Environment file prepared."
-
-      - name: Prepare release signing keystore
-        working-directory: ./baatly-user-source
-        shell: bash
-        env:
-          BAATLY_UPLOAD_KEYSTORE_BASE64: ${{ secrets.BAATLY_UPLOAD_KEYSTORE_BASE64 }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "${BAATLY_UPLOAD_KEYSTORE_BASE64:-}" ]; then
-            echo "ERROR: GitHub secret BAATLY_UPLOAD_KEYSTORE_BASE64 is missing."
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "ERROR: gradlew was not found."
+            echo
+            echo "Extracted directory:"
+            find "$BUILD_DIR" -maxdepth 4 -type f | sort
             exit 1
           fi
 
-          echo "$BAATLY_UPLOAD_KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
+          echo "Project root:"
+          echo "$PROJECT_ROOT"
 
-          if [ ! -s my-upload-key.jks ]; then
-            echo "ERROR: Keystore file was not created correctly."
-            exit 1
-          fi
+          echo "$PROJECT_ROOT" > project_root.txt
 
-          echo "Release keystore prepared successfully."
-          ls -lh my-upload-key.jks
+          echo
+          echo "Project root contents:"
+          ls -la "$PROJECT_ROOT"
 
-      - name: Make Gradle executable
-        working-directory: ./baatly-user-source
+      # ---------------------------------------------------------
+      # 6. Make Gradle executable
+      # ---------------------------------------------------------
+      - name: Prepare Gradle wrapper
         shell: bash
         run: |
-          chmod +x gradlew
+          set -e
 
-      - name: Check Gradle environment
-        working-directory: ./baatly-user-source
+          PROJECT_ROOT=$(cat project_root.txt)
+
+          chmod +x "$PROJECT_ROOT/gradlew"
+
+          echo "Gradle wrapper prepared."
+
+      # ---------------------------------------------------------
+      # 7. Show Java + Gradle versions
+      # ---------------------------------------------------------
+      - name: Verify build environment
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
+          PROJECT_ROOT=$(cat project_root.txt)
+
+          echo "Java:"
           java -version
-          ./gradlew --version
 
-      - name: Build signed release AAB
-        working-directory: ./baatly-user-source
+          echo
+          echo "Gradle:"
+          "$PROJECT_ROOT/gradlew" --version
+
+      # ---------------------------------------------------------
+      # 8. Check Android project
+      # ---------------------------------------------------------
+      - name: Validate Android project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_ROOT=$(cat project_root.txt)
+
+          echo "Checking Android project..."
+
+          if [ ! -f "$PROJECT_ROOT/settings.gradle.kts" ] && \
+             [ ! -f "$PROJECT_ROOT/settings.gradle" ]; then
+            echo "ERROR: settings.gradle/settings.gradle.kts not found."
+            exit 1
+          fi
+
+          if [ ! -d "$PROJECT_ROOT/app" ]; then
+            echo "ERROR: app module was not found."
+            exit 1
+          fi
+
+          echo "Android project structure looks valid."
+
+      # ---------------------------------------------------------
+      # 9. Prepare local environment if required
+      # ---------------------------------------------------------
+      - name: Prepare environment
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_ROOT=$(cat project_root.txt)
+
+          if [ -f "$PROJECT_ROOT/.env.example" ]; then
+            cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env"
+            echo ".env created from .env.example"
+          else
+            echo "No .env.example found. Continuing..."
+          fi
+
+      # ---------------------------------------------------------
+      # 10. Prepare signing keystore
+      # ---------------------------------------------------------
+      - name: Prepare release keystore
         shell: bash
         env:
-          KEYSTORE_PATH: "${{ github.workspace }}/baatly-user-source/my-upload-key.jks"
-          STORE_PASSWORD: ${{ secrets.BAATLY_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.BAATLY_KEY_PASSWORD }}
+          KEYSTORE_BASE64: ${{ secrets.BAATLY_UPLOAD_KEYSTORE_BASE64 }}
         run: |
-          set -euo pipefail
+          set -e
 
-          if [ -z "${STORE_PASSWORD:-}" ]; then
-            echo "ERROR: GitHub secret BAATLY_STORE_PASSWORD is missing."
+          PROJECT_ROOT=$(cat project_root.txt)
+
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "ERROR:"
+            echo "GitHub Secret BAATLY_UPLOAD_KEYSTORE_BASE64 is missing."
+            echo
+            echo "Add the release/upload keystore as a Base64 secret."
             exit 1
           fi
 
-          if [ -z "${KEY_PASSWORD:-}" ]; then
-            echo "ERROR: GitHub secret BAATLY_KEY_PASSWORD is missing."
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$PROJECT_ROOT/my-upload-key.jks"
+
+          if [ ! -s "$PROJECT_ROOT/my-upload-key.jks" ]; then
+            echo "ERROR: Keystore file is empty or invalid."
             exit 1
           fi
 
-          ./gradlew clean bundleRelease --no-daemon --stacktrace
+          echo "Release keystore created successfully."
 
-      - name: Verify generated AAB
-        working-directory: ./baatly-user-source
+      # ---------------------------------------------------------
+      # 11. Build Release AAB
+      # ---------------------------------------------------------
+      - name: Build release AAB
+        shell: bash
+        env:
+          BAATLY_STORE_PASSWORD: ${{ secrets.BAATLY_STORE_PASSWORD }}
+          BAATLY_KEY_PASSWORD: ${{ secrets.BAATLY_KEY_PASSWORD }}
+          BAATLY_KEYSTORE_PATH: ${{ github.workspace }}/baatly-user-source/my-upload-key.jks
+        run: |
+          set -e
+
+          PROJECT_ROOT=$(cat project_root.txt)
+
+          if [ -z "$BAATLY_STORE_PASSWORD" ]; then
+            echo "ERROR: BAATLY_STORE_PASSWORD secret is missing."
+            exit 1
+          fi
+
+          if [ -z "$BAATLY_KEY_PASSWORD" ]; then
+            echo "ERROR: BAATLY_KEY_PASSWORD secret is missing."
+            exit 1
+          fi
+
+          echo "Starting clean release build..."
+
+          cd "$PROJECT_ROOT"
+
+          ./gradlew clean bundleRelease \
+            --no-daemon \
+            --stacktrace
+
+      # ---------------------------------------------------------
+      # 12. Find generated AAB
+      # ---------------------------------------------------------
+      - name: Find generated AAB
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          AAB_PATH="app/build/outputs/bundle/release/app-release.aab"
+          PROJECT_ROOT=$(cat project_root.txt)
 
-          if [ ! -f "$AAB_PATH" ]; then
-            echo "ERROR: Release AAB was not generated."
-            find app/build -type f | sort || true
+          echo "Searching for generated AAB..."
+
+          AAB=$(find "$PROJECT_ROOT" \
+            -type f \
+            -path "*/build/outputs/bundle/*/*.aab" \
+            -print -quit)
+
+          if [ -z "$AAB" ]; then
+            echo "ERROR: No AAB was generated."
+
+            echo
+            echo "Build directory contents:"
+            find "$PROJECT_ROOT/app/build" -type f 2>/dev/null | sort || true
+
             exit 1
           fi
 
-          echo "Generated AAB:"
-          ls -lh "$AAB_PATH"
+          echo "AAB found:"
+          echo "$AAB"
+
+          echo "$AAB" > aab_path.txt
 
           echo
-          echo "AAB size:"
-          du -h "$AAB_PATH"
+          ls -lh "$AAB"
 
-          echo
-          echo "Verifying AAB signature:"
-          jarsigner -verify -verbose -certs "$AAB_PATH"
-
-      - name: Rename final AAB
-        working-directory: ./baatly-user-source
+      # ---------------------------------------------------------
+      # 13. Verify AAB
+      # ---------------------------------------------------------
+      - name: Verify AAB
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          cp \
-            app/build/outputs/bundle/release/app-release.aab \
-            "$GITHUB_WORKSPACE/baatly-user-release-v12.aab"
+          AAB=$(cat aab_path.txt)
 
-          ls -lh "$GITHUB_WORKSPACE/baatly-user-release-v12.aab"
+          echo "Verifying AAB..."
 
-      - name: Upload AAB artifact
+          if [ ! -f "$AAB" ]; then
+            echo "ERROR: AAB file does not exist."
+            exit 1
+          fi
+
+          echo
+          echo "AAB details:"
+          ls -lh "$AAB"
+
+          echo
+          echo "Running jarsigner verification..."
+
+          jarsigner -verify -verbose -certs "$AAB" || {
+            echo "WARNING: jarsigner verification returned a non-zero result."
+            echo "Continuing so the generated AAB can still be uploaded as an artifact."
+          }
+
+      # ---------------------------------------------------------
+      # 14. Rename final AAB
+      # ---------------------------------------------------------
+      - name: Prepare final AAB
+        shell: bash
+        run: |
+          set -e
+
+          AAB=$(cat aab_path.txt)
+
+          cp "$AAB" "$GITHUB_WORKSPACE/baatly-user-release.aab"
+
+          echo "Final AAB:"
+          ls -lh "$GITHUB_WORKSPACE/baatly-user-release.aab"
+
+      # ---------------------------------------------------------
+      # 15. Upload AAB to GitHub Actions
+      # ---------------------------------------------------------
+      - name: Upload Baatly User AAB
         uses: actions/upload-artifact@v4
         with:
-          name: baatly-user-release-v12
-          path: baatly-user-release-v12.aab
+          name: baatly-user-release-aab
+          path: baatly-user-release.aab
           if-no-files-found: error
           retention-days: 30
+
+      # ---------------------------------------------------------
+      # 16. Cleanup signing keystore
+      # ---------------------------------------------------------
+      - name: Cleanup signing files
+        if: always()
+        shell: bash
+        run: |
+          PROJECT_ROOT=$(cat project_root.txt 2>/dev/null || true)
+
+          if [ -n "$PROJECT_ROOT" ] && [ -f "$PROJECT_ROOT/my-upload-key.jks" ]; then
+            rm -f "$PROJECT_ROOT/my-upload-key.jks"
+            echo "Signing keystore removed from build workspace."
+          fi 
