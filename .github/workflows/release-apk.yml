@@ -88,27 +88,32 @@ jobs:
 
           echo "Android project extracted successfully."
 
-      # Step 5: Generate the app environment file from GitHub Secrets
+      # Step 5: Configure AWS API URL and Agora App ID
       - name: Configure app secrets
         shell: bash
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || secrets.SUPABASE_ANON_KEY }}
+          AWS_API_BASE_URL: ${{ secrets.AWS_API_BASE_URL }}
           AGORA_APP_ID: ${{ secrets.AGORA_APP_ID }}
         run: |
           set -euo pipefail
 
-          : "${SUPABASE_URL:?Missing SUPABASE_URL GitHub Secret}"
-          : "${SUPABASE_PUBLISHABLE_KEY:?Missing Supabase publishable key Secret}"
+          : "${AWS_API_BASE_URL:?Missing AWS_API_BASE_URL GitHub Secret}"
           : "${AGORA_APP_ID:?Missing AGORA_APP_ID GitHub Secret}"
 
-          printf 'SUPABASE_URL=%s\nSUPABASE_PUBLISHABLE_KEY=%s\nAGORA_APP_ID=%s\n' \
-            "$SUPABASE_URL" \
-            "$SUPABASE_PUBLISHABLE_KEY" \
+          case "$AWS_API_BASE_URL" in
+            https://*) ;;
+            *)
+              echo "::error::AWS_API_BASE_URL must start with https://"
+              exit 1
+              ;;
+          esac
+
+          printf 'AWS_API_BASE_URL=%s\nAGORA_APP_ID=%s\n' \
+            "$AWS_API_BASE_URL" \
             "$AGORA_APP_ID" \
             > "$PROJECT_DIR/.env"
 
-          echo "App environment configured."
+          echo "AWS app environment configured."
 
       # Step 6: Decode the existing release signing keystore
       - name: Configure release signing
