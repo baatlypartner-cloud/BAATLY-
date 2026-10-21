@@ -24,32 +24,27 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      # Step 1: Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      # Step 2: Setup Java 17
       - name: Setup Java 17
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
-      # Step 3: Setup Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      # Step 4: Find and extract the uploaded ZIP
-      - name: Extract uploaded Android project
+      - name: Find and extract Android ZIP
         shell: bash
         run: |
           set -euo pipefail
 
           ZIP_FILE=""
 
-          # Prefer a ZIP changed in the current commit.
           while IFS= read -r candidate; do
             if [[ -f "$candidate" ]]; then
               ZIP_FILE="$candidate"
@@ -60,8 +55,6 @@ jobs:
               grep -Ei '\.zip$' || true
           )
 
-          # If this was a workflow-only change or manual run,
-          # find the newest existing ZIP path in Git history.
           if [[ -z "$ZIP_FILE" ]]; then
             while IFS= read -r candidate; do
               if [[ -f "$candidate" ]]; then
@@ -76,16 +69,15 @@ jobs:
           fi
 
           if [[ -z "$ZIP_FILE" || ! -f "$ZIP_FILE" ]]; then
-            echo "::error::No existing ZIP file found in the repository."
+            echo "::error::No Android ZIP found in repository."
             exit 1
           fi
 
-          echo "Source ZIP: $ZIP_FILE"
+          echo "Building ZIP: $ZIP_FILE"
 
           UNPACK_DIR="$RUNNER_TEMP/baatly-unpacked"
           rm -rf "$UNPACK_DIR"
           mkdir -p "$UNPACK_DIR"
-
           unzip -q "$ZIP_FILE" -d "$UNPACK_DIR"
 
           if [[ -f "$UNPACK_DIR/gradlew" ]]; then
@@ -94,30 +86,50 @@ jobs:
             WRAPPER_PATH="$(find "$UNPACK_DIR" -type f -name gradlew -print -quit)"
 
             if [[ -z "$WRAPPER_PATH" ]]; then
-              echo "::error::Gradle wrapper was not found inside the ZIP."
+              echo "::error::Gradle wrapper not found."
               exit 1
             fi
 
             PROJECT_DIR="$(dirname "$WRAPPER_PATH")"
           fi
 
-          if [[ ! -f "$PROJECT_DIR/settings.gradle.kts" ]]; then
-            echo "::error::Android project settings.gradle.kts is missing."
-            exit 1
-          fi
-
-          if [[ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
-            echo "::error::Android app module was not found."
+          if [[ ! -f "$PROJECT_DIR/settings.gradle.kts" ||
+                ! -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
+            echo "::error::Expected Android project files are missing."
             exit 1
           fi
 
           chmod +x "$PROJECT_DIR/gradlew"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project extracted successfully."
+      # Fix the deprecated OkHttp API in the uploaded ZIP.
+      - name: Fix OkHttp URL calls
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # Step 5: Configure AWS app URL and Agora ID
-      - name: Configure app secrets
+          CLIENT_FILE="$PROJECT_DIR/app/src/main/java/com/example/data/network/SupabaseClient.kt"
+
+          if [[ ! -f "$CLIENT_FILE" ]]; then
+            echo "::error::SupabaseClient.kt not found in the ZIP."
+            exit 1
+          fi
+
+          python3 - "$CLIENT_FILE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          source = path.read_text(encoding="utf-8")
+          old = "okhttp3.HttpUrl.get(rawUrl)"
+          new = "rawUrl.toHttpUrl()"
+          count = source.count(old)
+
+          path.write_text(source.replace(old, new), encoding="utf-8")
+          print(f"Replaced {count} deprecated OkHttp call(s).")
+          PY
+
+      - name: Configure AWS app secrets
         shell: bash
         env:
           AWS_API_BASE_URL: ${{ secrets.AWS_API_BASE_URL }}
@@ -137,13 +149,11 @@ jobs:
           esac
 
           printf 'AWS_API_BASE_URL=%s\nAGORA_APP_ID=%s\n' \
-            "$AWS_API_BASE_URL" \
-            "$AGORA_APP_ID" \
+            "$AWS_API_BASE_URL" "$AGORA_APP_ID" \
             > "$PROJECT_DIR/.env"
 
           echo "AWS app environment configured."
 
-      # Step 6: Configure release signing
       - name: Configure release signing
         shell: bash
         env:
@@ -158,34 +168,29 @@ jobs:
           : "${KEY_PASSWORD:?Missing key password Secret}"
 
           KEYSTORE_FILE="$PROJECT_DIR/my-upload-key.jks"
-
           printf '%s' "$KEYSTORE_B64" | base64 --decode > "$KEYSTORE_FILE"
 
           if [[ ! -s "$KEYSTORE_FILE" ]]; then
-            echo "::error::The decoded release keystore is empty."
+            echo "::error::Decoded keystore is empty."
             exit 1
           fi
 
           keytool -list \
             -keystore "$KEYSTORE_FILE" \
             -storepass "$STORE_PASSWORD" \
-            -alias upload \
-            >/dev/null
+            -alias upload >/dev/null
 
           echo "Release signing keystore validated."
 
-      # Step 7: Install required Android build packages
       - name: Install Android build packages
         shell: bash
         run: |
           set -euo pipefail
-
           sdkmanager --install \
             "platforms;android-36.1" \
             "build-tools;36.0.0" \
             "platform-tools"
 
-      # Step 8: Build the signed Release APK
       - name: Build signed Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -197,7 +202,6 @@ jobs:
           set -euo pipefail
           ./gradlew --no-daemon --stacktrace :app:assembleRelease
 
-      # Step 9: Verify APK and signature
       - name: Verify Release APK
         shell: bash
         run: |
@@ -215,7 +219,6 @@ jobs:
 
           echo "Release APK generated and signature verified."
 
-      # Step 10: Upload the APK artifact
       - name: Upload Release APK
         uses: actions/upload-artifact@v7
         with:
