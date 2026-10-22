@@ -5,10 +5,6 @@ on:
     paths:
       - '*.zip'
       - '**/*.zip'
-      - '*.ZIP'
-      - '**/*.ZIP'
-      - '.github/workflows/**'
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,60 +20,43 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # Step 1: Get the uploaded ZIP from GitHub
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
+      # Step 2: Install Java required by this Android project
       - name: Setup Java 17
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
+      # Step 3: Configure Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Find and extract Android ZIP
+      # Step 4: Automatically find and extract the ZIP
+      - name: Extract uploaded Android project
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE=""
-
-          while IFS= read -r candidate; do
-            if [[ -f "$candidate" ]]; then
-              ZIP_FILE="$candidate"
-              break
-            fi
-          done < <(
-            git diff-tree --no-commit-id --name-only -r "$GITHUB_SHA" |
-              grep -Ei '\.zip$' || true
-          )
-
-          if [[ -z "$ZIP_FILE" ]]; then
-            while IFS= read -r candidate; do
-              if [[ -f "$candidate" ]]; then
-                ZIP_FILE="$candidate"
-                break
-              fi
-            done < <(
-              git log --pretty=format: --name-only -- '*.zip' '*.ZIP' |
-                grep -Ei '\.zip$' |
-                awk '!seen[$0]++' || true
-            )
-          fi
+          ZIP_FILE="$(git show --format= --name-only "$GITHUB_SHA" | grep -Ei '\.zip$' | head -n 1 || true)"
 
           if [[ -z "$ZIP_FILE" || ! -f "$ZIP_FILE" ]]; then
-            echo "::error::No Android ZIP found in repository."
+            echo "::error::The newly uploaded ZIP file could not be found."
             exit 1
           fi
 
-          echo "Building ZIP: $ZIP_FILE"
+          echo "Source ZIP: $ZIP_FILE"
 
           UNPACK_DIR="$RUNNER_TEMP/baatly-unpacked"
+
           rm -rf "$UNPACK_DIR"
           mkdir -p "$UNPACK_DIR"
+
           unzip -q "$ZIP_FILE" -d "$UNPACK_DIR"
 
           if [[ -f "$UNPACK_DIR/gradlew" ]]; then
@@ -86,74 +65,52 @@ jobs:
             WRAPPER_PATH="$(find "$UNPACK_DIR" -type f -name gradlew -print -quit)"
 
             if [[ -z "$WRAPPER_PATH" ]]; then
-              echo "::error::Gradle wrapper not found."
+              echo "::error::Gradle wrapper was not found inside the ZIP."
               exit 1
             fi
 
             PROJECT_DIR="$(dirname "$WRAPPER_PATH")"
           fi
 
-          if [[ ! -f "$PROJECT_DIR/settings.gradle.kts" ||
-                ! -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
-            echo "::error::Expected Android project files are missing."
+          if [[ ! -f "$PROJECT_DIR/settings.gradle.kts" ]]; then
+            echo "::error::Android project settings.gradle.kts is missing."
+            exit 1
+          fi
+
+          if [[ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
+            echo "::error::Android app module was not found."
             exit 1
           fi
 
           chmod +x "$PROJECT_DIR/gradlew"
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      # Fix the deprecated OkHttp API in the uploaded ZIP.
-      - name: Fix OkHttp URL calls
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo "Android project extracted successfully."
 
-          CLIENT_FILE="$PROJECT_DIR/app/src/main/java/com/example/data/network/SupabaseClient.kt"
-
-          if [[ ! -f "$CLIENT_FILE" ]]; then
-            echo "::error::SupabaseClient.kt not found in the ZIP."
-            exit 1
-          fi
-
-          python3 - "$CLIENT_FILE" <<'PY'
-          from pathlib import Path
-          import sys
-
-          path = Path(sys.argv[1])
-          source = path.read_text(encoding="utf-8")
-          old = "okhttp3.HttpUrl.get(rawUrl)"
-          new = "rawUrl.toHttpUrl()"
-          count = source.count(old)
-
-          path.write_text(source.replace(old, new), encoding="utf-8")
-          print(f"Replaced {count} deprecated OkHttp call(s).")
-          PY
-
-      - name: Configure AWS app secrets
+      # Step 5: Generate the app environment file from GitHub Secrets
+      - name: Configure app secrets
         shell: bash
         env:
-          AWS_API_BASE_URL: ${{ secrets.AWS_API_BASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || secrets.SUPABASE_ANON_KEY }}
           AGORA_APP_ID: ${{ secrets.AGORA_APP_ID }}
         run: |
           set -euo pipefail
 
-          : "${AWS_API_BASE_URL:?Missing AWS_API_BASE_URL GitHub Secret}"
+          : "${SUPABASE_URL:?Missing SUPABASE_URL GitHub Secret}"
+          : "${SUPABASE_PUBLISHABLE_KEY:?Missing Supabase publishable key Secret}"
           : "${AGORA_APP_ID:?Missing AGORA_APP_ID GitHub Secret}"
 
-          case "$AWS_API_BASE_URL" in
-            https://*) ;;
-            *)
-              echo "::error::AWS_API_BASE_URL must start with https://"
-              exit 1
-              ;;
-          esac
-
-          printf 'AWS_API_BASE_URL=%s\nAGORA_APP_ID=%s\n' \
-            "$AWS_API_BASE_URL" "$AGORA_APP_ID" \
+          printf 'SUPABASE_URL=%s\nSUPABASE_PUBLISHABLE_KEY=%s\nAGORA_APP_ID=%s\n' \
+            "$SUPABASE_URL" \
+            "$SUPABASE_PUBLISHABLE_KEY" \
+            "$AGORA_APP_ID" \
             > "$PROJECT_DIR/.env"
 
-          echo "AWS app environment configured."
+          echo "App environment configured."
 
+      # Step 6: Decode the existing release signing keystore
       - name: Configure release signing
         shell: bash
         env:
@@ -168,29 +125,34 @@ jobs:
           : "${KEY_PASSWORD:?Missing key password Secret}"
 
           KEYSTORE_FILE="$PROJECT_DIR/my-upload-key.jks"
+
           printf '%s' "$KEYSTORE_B64" | base64 --decode > "$KEYSTORE_FILE"
 
           if [[ ! -s "$KEYSTORE_FILE" ]]; then
-            echo "::error::Decoded keystore is empty."
+            echo "::error::The decoded release keystore is empty."
             exit 1
           fi
 
           keytool -list \
             -keystore "$KEYSTORE_FILE" \
             -storepass "$STORE_PASSWORD" \
-            -alias upload >/dev/null
+            -alias upload \
+            >/dev/null
 
           echo "Release signing keystore validated."
 
+      # Step 7: Install the required Android SDK platform and build tools
       - name: Install Android build packages
         shell: bash
         run: |
           set -euo pipefail
+
           sdkmanager --install \
             "platforms;android-36.1" \
             "build-tools;36.0.0" \
             "platform-tools"
 
+      # Step 8: Build the signed release APK
       - name: Build signed Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
@@ -200,8 +162,10 @@ jobs:
           KEYSTORE_PATH: ${{ env.PROJECT_DIR }}/my-upload-key.jks
         run: |
           set -euo pipefail
+
           ./gradlew --no-daemon --stacktrace :app:assembleRelease
 
+      # Step 9: Verify the generated APK
       - name: Verify Release APK
         shell: bash
         run: |
@@ -219,11 +183,11 @@ jobs:
 
           echo "Release APK generated and signature verified."
 
+      # Step 10: Upload the APK as a downloadable artifact
       - name: Upload Release APK
         uses: actions/upload-artifact@v7
         with:
           name: baatly-release-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
-          retention-days: 14
- 
+          retention-days: 14 
